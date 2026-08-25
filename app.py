@@ -11,7 +11,7 @@ from werkzeug.utils import secure_filename
 
 # ── Flask App Setup ───────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:3000"])
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 KNOWN_FACES_DIR = os.path.join(os.path.dirname(__file__), "known_faces")
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
