@@ -3,6 +3,8 @@ import face_recognition
 import os
 import threading
 import time
+import base64
+import numpy as np
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -13,6 +15,9 @@ CORS(app, origins=["http://localhost:5173", "http://localhost:3000"])
 
 KNOWN_FACES_DIR = os.path.join(os.path.dirname(__file__), "known_faces")
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+ADMIN_TOKEN = "secret-admin-token-123"
 
 # ── Globals (protected by lock) ───────────────────────────────────────────────
 lock = threading.Lock()
@@ -46,99 +51,62 @@ def load_known_faces():
     print(f"[INFO] Loaded {len(names)} known face(s): {names}")
 
 
-# ── Background Capture Thread ─────────────────────────────────────────────────
-def capture_loop():
-    global latest_frame, detection_log
+# ── Stateless Detection Route ───────────────────────────────────────────────────
+@app.route("/detect", methods=["POST"])
+def detect_faces():
+    global detection_log
+    data = request.json
+    if not data or "image" not in data:
+        return jsonify({"error": "Missing image data"}), 400
 
-    video = cv2.VideoCapture(0)
-    video.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    video.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    image_data = data["image"]
+    if "," in image_data:
+        image_data = image_data.split(",")[1]
 
-    process_this_frame = True
-    locations = []
-    face_names = []
-
-    while True:
-        success, frame = video.read()
-        if not success or frame is None:
-            time.sleep(0.05)
-            continue
-
-        if process_this_frame:
-            small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-            rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            locations = face_recognition.face_locations(rgb_small)
-
-            with lock:
-                enc_copy = list(known_encodings)
-                names_copy = list(known_names)
-
-            encodings = face_recognition.face_encodings(rgb_small, locations)
-            face_names = []
-            for face_enc in encodings:
-                name = "Unknown"
-                if enc_copy:
-                    matches = face_recognition.compare_faces(enc_copy, face_enc, tolerance=0.5)
-                    if True in matches:
-                        name = names_copy[matches.index(True)]
-                face_names.append(name)
-
-            # Update detection log
-            timestamp = time.strftime("%H:%M:%S")
-            with lock:
-                for n in face_names:
-                    detection_log.append({"name": n, "time": timestamp})
-                detection_log = detection_log[-MAX_LOG:]
-
-        process_this_frame = not process_this_frame
-
-        # Draw bounding boxes
-        for (top, right, bottom, left), name in zip(locations, face_names):
-            top *= 4; right *= 4; bottom *= 4; left *= 4
-            color = (0, 255, 128) if name != "Unknown" else (0, 80, 255)
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-            cv2.rectangle(frame, (left, bottom - 28), (right, bottom), color, cv2.FILLED)
-            cv2.putText(frame, name, (left + 6, bottom - 8),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.6, (0, 0, 0), 1)
-
-        # Encode as JPEG
-        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        with lock:
-            latest_frame = jpeg.tobytes()
-
-    video.release()
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.route("/status")
-def status():
-    with lock:
-        count = len(known_names)
-        names = list(known_names)
-    return jsonify({"status": "ok", "known_faces": count, "names": names})
-
-
-def generate_frames():
-    while True:
-        with lock:
-            frame = latest_frame
+    try:
+        img_bytes = base64.b64decode(image_data)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if frame is None:
-            time.sleep(0.05)
-            continue
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-        )
-        time.sleep(1 / 30)  # ~30 fps cap
+            return jsonify({"error": "Invalid image"}), 400
+    except Exception as e:
+        return jsonify({"error": f"Image decoding failed: {e}"}), 400
 
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    small = cv2.resize(rgb_frame, (0, 0), fx=0.5, fy=0.5)
+    
+    locations = face_recognition.face_locations(small)
+    encodings = face_recognition.face_encodings(small, locations)
 
-@app.route("/video_feed")
-def video_feed():
-    return Response(
-        generate_frames(),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
-    )
+    with lock:
+        enc_copy = list(known_encodings)
+        names_copy = list(known_names)
+
+    face_names = []
+    for face_enc in encodings:
+        name = "Unknown"
+        if enc_copy:
+            matches = face_recognition.compare_faces(enc_copy, face_enc, tolerance=0.5)
+            if True in matches:
+                name = names_copy[matches.index(True)]
+        face_names.append(name)
+
+    timestamp = time.strftime("%H:%M:%S")
+    with lock:
+        for n in face_names:
+            detection_log.append({"name": n, "time": timestamp})
+        global MAX_LOG
+        detection_log = detection_log[-MAX_LOG:]
+
+    results = []
+    for (top, right, bottom, left), name in zip(locations, face_names):
+        top *= 2; right *= 2; bottom *= 2; left *= 2
+        results.append({
+            "name": name,
+            "box": [top, right, bottom, left]
+        })
+
+    return jsonify({"faces": results})
 
 
 @app.route("/known_faces", methods=["GET"])
@@ -146,6 +114,14 @@ def get_known_faces():
     with lock:
         names = list(known_names)
     return jsonify({"faces": names})
+
+
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    data = request.json
+    if data and data.get("password") == ADMIN_PASSWORD:
+        return jsonify({"token": ADMIN_TOKEN})
+    return jsonify({"error": "Invalid password"}), 401
 
 
 @app.route("/register_face", methods=["POST"])
@@ -169,6 +145,20 @@ def register_face():
         if not encs:
             os.remove(save_path)
             return jsonify({"error": "No face detected in the uploaded image. Please try a clearer photo."}), 400
+            
+        # Deduplication Check
+        new_enc = encs[0]
+        with lock:
+            enc_copy = list(known_encodings)
+            names_copy = list(known_names)
+            
+        if enc_copy:
+            matches = face_recognition.compare_faces(enc_copy, new_enc, tolerance=0.5)
+            if True in matches:
+                existing_name = names_copy[matches.index(True)]
+                os.remove(save_path)
+                return jsonify({"error": f"Face already registered as '{existing_name}'"}), 400
+
     except Exception as e:
         os.remove(save_path)
         return jsonify({"error": f"Could not process image: {str(e)}"}), 400
@@ -179,6 +169,10 @@ def register_face():
 
 @app.route("/remove_face/<name>", methods=["DELETE"])
 def remove_face(name):
+    token = request.headers.get("Authorization")
+    if token != f"Bearer {ADMIN_TOKEN}":
+        return jsonify({"error": "Unauthorized"}), 401
+
     removed = False
     for ext in [".jpg", ".jpeg", ".png"]:
         path = os.path.join(KNOWN_FACES_DIR, secure_filename(f"{name}{ext}"))
@@ -202,7 +196,7 @@ def get_detection_log():
 # ── Entry Point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     load_known_faces()
-    t = threading.Thread(target=capture_loop, daemon=True)
-    t.start()
-    print("[INFO] Flask server starting on http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    # Note: On Render, use a different port if needed via os.environ.get('PORT')
+    port = int(os.environ.get("PORT", 5001))
+    print(f"[INFO] Flask server starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
