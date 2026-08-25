@@ -23,7 +23,6 @@ ADMIN_TOKEN = "secret-admin-token-123"
 lock = threading.Lock()
 known_encodings = []
 known_names = []
-latest_frame = None          # latest annotated JPEG bytes
 detection_log = []           # [{name, time}]
 MAX_LOG = 50
 
@@ -49,6 +48,17 @@ def load_known_faces():
         known_encodings = encodings
         known_names = names
     print(f"[INFO] Loaded {len(names)} known face(s): {names}")
+
+
+# Load faces at module level so gunicorn workers pick them up on start
+load_known_faces()
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return jsonify({"status": "ok", "message": "Facial Recognition API is running"})
 
 
 # ── Stateless Detection Route ───────────────────────────────────────────────────
