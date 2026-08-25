@@ -126,6 +126,14 @@ def get_known_faces():
     return jsonify({"faces": names})
 
 
+@app.route("/status")
+def status():
+    with lock:
+        count = len(known_names)
+        names = list(known_names)
+    return jsonify({"status": "ok", "known_faces": count, "names": names})
+
+
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
     data = request.json
