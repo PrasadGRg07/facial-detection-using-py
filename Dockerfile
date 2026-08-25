@@ -25,5 +25,5 @@ RUN pip install gunicorn
 # Copy source code
 COPY . .
 
-# Run the app using gunicorn on the port specified by Render
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--threads", "4", "app:app"]
+# Run the app using gunicorn - Railway injects $PORT automatically
+CMD gunicorn --bind 0.0.0.0:$PORT --threads 4 app:app
